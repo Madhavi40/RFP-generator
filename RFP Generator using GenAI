@@ -39,22 +39,6 @@ llm = BedrockChat(
     client=boto3.client("bedrock-runtime", region_name=REGION),
 )
 
-# # Prompt template for RFP generation
-# prompt_template = PromptTemplate(
-#     template="""
-# You are a professional business analyst tasked with writing a detailed and formal Request for Proposal (RFP).
-# The product/service the user is interested in is: {product}.
-
-# Use the following context extracted from the company's website to draft the RFP:
-# --------------------
-# {context}
-# --------------------
-
-# Now write the RFP.
-# """,
-#     input_variables=["product", "context"],
-# )
-
 # Prompt template for RFP generation
 prompt_template = PromptTemplate(
     template="""
