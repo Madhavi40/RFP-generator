@@ -1,66 +1,72 @@
-import json
-import os
-import sys
-import boto3
 import streamlit as st
-
-# To generate embeddings
-
-from langchain.embeddings import BedrockEmbeddings
-from langchain_community.chat_models import BedrockChat
-
-# Data ingestion
-
-import numpy as np
+from langchain.document_loaders import WebBaseLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import UnstructuredURLLoader
-
-#Vector Embedding and Vector store
-
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-
-#LLM 
-
-from langchain.prompts import PromptTemplate
+from langchain.vectorstores import Chroma
+from langchain.embeddings import BedrockEmbeddings
 from langchain.chains import RetrievalQA
+from langchain_community.chat_models import BedrockChat
+from langchain.prompts import PromptTemplate
+import boto3
+import os
+from anthropic import AnthropicBedrock
+from langchain_core.messages import HumanMessage
 
-#Bedrock Clients Titan Text Embeddings V2
-bedrock=boto3.client(service_name="bedrock-runtime", region_name = "us-east-1")
-bedrock_embeddings=BedrockEmbeddings(model_id="amazon.titan-embed-text-v2:0", client=bedrock)
+# Configure AWS Bedrock client
+client = AnthropicBedrock(
+    aws_access_key=os.getenv("access key"),
+    aws_secret_key=os.getenv("secret key"),
+    aws_region=os.getenv("us-east-1")
+)
 
-# Data ingestion
+# AWS and Bedrock config
+REGION = "us-east-1"
+os.environ["AWS_DEFAULT_REGION"] = REGION
 
-def data_ingest():
-    urls= ['https://www.ibef.org/industry/manufacturing-sector-india']
-    loader=UnstructuredURLLoader(urls=urls)
-    data=loader.load()
+# Titan Embeddings via LangChain
+embedding = BedrockEmbeddings(
+    model_id="amazon.titan-embed-text-v2:0",
+    client=boto3.client("bedrock-runtime", region_name=REGION)
+)
 
-    text_splitter=RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
+# Claude 3.5 Sonnet via LangChain
+llm = BedrockChat(
+    model_id="anthropic.claude-3-sonnet-20240229-v1:0",
+    model_kwargs={
+        "temperature": 0.7,
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 1000,
+    },
+    client=boto3.client("bedrock-runtime", region_name=REGION),
+)
 
-    docs=text_splitter.split_documents(data)
-    return docs
+# # Prompt template for RFP generation
+# prompt_template = PromptTemplate(
+#     template="""
+# You are a professional business analyst tasked with writing a detailed and formal Request for Proposal (RFP).
+# The product/service the user is interested in is: {product}.
 
-# Vector Embedding and vector store
+# Use the following context extracted from the company's website to draft the RFP:
+# --------------------
+# {context}
+# --------------------
 
-def get_vector_store(docs):
-    vectorstore = Chroma.from_documents(docs,bedrock_embeddings,persist_directory="chroma_index")
-    #vectorstore.persist()
+# Now write the RFP.
+# """,
+#     input_variables=["product", "context"],
+# )
 
-
-def get_sonnet_llm():
-    llm=BedrockChat(model_id="anthropic.claude-3-5-sonnet-20240620-v1:0",client=bedrock,model_kwargs={'max_tokens':1000})
-    return llm
-
-prompt_template = """
+# Prompt template for RFP generation
+prompt_template = PromptTemplate(
+    template="""
 Objective : To create Request for Proposal (RFP) document
 Human: You are a senior purchasing manager, you have been tasked to create RFP to solicit proposals from vendors
 for products and services that your company intend to purchase. The RFP is a critical document that outlines 
-companies requirements, expectations and evaluation criteria. Generate an effective RFP by addressingthe following 
-key points:
+companies requirements, expectations and evaluation criteria. 
+The product/service the user is interested in is: {product}.
+Generate an effective RFP by addressingthe following key points:
 
 Introduction and Background: Provide brief introduction about your company, its mission and purpose of RFP
-Scope : Clearly define the scope of work and spcific products and service you require from company
+Scope : Clearly define the scope of work and specific products and service you require from company
 Vendor qualifications: Specify the qualifications and experience you expect from vendors
 Terms and conditions : Outline any specific terms, conditions and requirements that vendor must agree including
 pricing, schedules, intellectual property
@@ -68,51 +74,45 @@ pricing, schedules, intellectual property
 {context}
 </context>
 
-Question: {question}
+""",
+     input_variables=["product", "context"],
+)
 
 
-Assistant:"""
+# Streamlit UI
+st.title("📄 RFP Generator")
 
-PROMPT = PromptTemplate(template=prompt_template,input_variables=["context","question"])
+url = st.text_input("Enter website URL")
+product = st.text_input("Product/Service for RFP")
 
-def get_response_llm(llm,vectorstore,query):
-    qa=RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=vectorstore.as_retriever(
-            search_type="similarity", search_kwargs={"k": 3}
-        ),
-        return_source_documents=True,
-        chain_type_kwargs={"prompt": PROMPT}
+if st.button("Generate RFP"):
+    if not url or not product:
+        st.warning("Please fill in both fields.")
+    else:
+        with st.spinner("Scraping website..."):
+            loader = WebBaseLoader(url)
+            docs = loader.load()
 
-    )
-    answer=qa({"query":query})
-    return answer['result']
+        with st.spinner("Chunking content..."):
+            splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+            chunks = splitter.split_documents(docs)
 
-def main():
-    st.set_page_config("Generate RFP")
-    st.header("Take customer query to generate RFP")
+        with st.spinner("Embedding and storing in vector DB..."):
+            vectordb = Chroma.from_documents(
+                documents=chunks,
+                embedding=embedding,
+                persist_directory="./chroma_langchain"
+            )
 
-    user_question = st.text_input("Which buyer do you want to generate RFP")
+        with st.spinner("Retrieving relevant chunks..."):
+            retriever = vectordb.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+            relevant_docs = retriever.get_relevant_documents(product)
+            # context = "\n\n".join(doc.page_content for doc in relevant_docs)
+            context = relevant_docs
 
-    with st.sidebar:
-        st.title("Menu:")
+        with st.spinner("Generating RFP with Claude..."):
+            prompt = prompt_template.format(product=product, context=context)
+            rfp = llm([HumanMessage(content=prompt)])
 
-        if st.button("Vectors Update"):
-            with st.spinner("Processing..."):
-                docs = data_ingest()
-                get_vector_store(docs)
-                st.success("Done")
-
-    if st.button("Generate RFP"):
-        with st.spinner("Processing..."):
-            #Chroma_index = Chroma.load("chroma_index")
-            Chroma_index = Chroma(persist_directory="chroma_index", embedding_function=bedrock_embeddings)
-            llm=get_sonnet_llm()
-
-            st.write(get_response_llm(llm,Chroma_index,user_question))
-            st.success("Done")
-
-
-if __name__ == "__main__":
-    main()
+        st.subheader("📄 Generated RFP")
+        st.text(rfp.content)
